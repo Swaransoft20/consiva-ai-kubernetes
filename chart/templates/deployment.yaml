@@ -1,0 +1,98 @@
+{{/*
+  Both containers run in one Pod so that they share a network namespace. The frontend's
+  baked-in NEXT_PUBLIC_API_URL="/" resolves against whatever origin served the page, and the
+  Ingress routes /api/* to the backend on the same host.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.name }}
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Values.name }}
+    app.kubernetes.io/component: consiva-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.name }}
+      app.kubernetes.io/component: consiva-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ .Values.name }}
+        app.kubernetes.io/component: consiva-app
+        # Marketplace consumption tracking. Goes on the POD TEMPLATE, not on the Deployment's own
+        # metadata: the guide's example places it under template.metadata.labels, and Partner
+        # Support's instruction was to apply it "directly to your deployed pods". It is an
+        # ordinary Kubernetes label, not a GCP resource label.
+        #
+        # Hard-coded rather than exposed as a value: it identifies this listing, so a deployment
+        # that overrode or blanked it would simply stop being tracked. 62 characters, inside
+        # Kubernetes' 63-character limit, and it is deliberately NOT part of spec.selector —
+        # adding it there would change the selector of an existing Deployment, which is immutable.
+        goog-partner-solution: isol_plb32_001kf00001i7iqkiaf_4mpylcskv5jhj5xoj6inycopc5kqunyq
+    spec:
+      containers:
+        - name: backend
+          image: "{{ .Values.image.backend.repository }}:{{ .Values.image.backend.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http-api
+              containerPort: 5000
+          envFrom:
+            - configMapRef:
+                name: {{ .Values.name }}-config
+            - secretRef:
+                name: {{ .Values.name }}-secret
+          # /health is a plain 200 with no auth, and it stays 200 even when the backend is
+          # running degraded because its database is unreachable. That is deliberate and it is
+          # what these probes want: an unattended Marketplace verification deploys with the
+          # schema's placeholder database default, and a probe that failed there would turn a
+          # correctly built app into a crash loop.
+          #
+          # The trade-off: a deployment whose database never appears stays Ready forever as far
+          # as these probes are concerned. The honest signal is /health/ready, which returns 503
+          # until the schema and seeds are actually in place, plus the "status" field in /health's
+          # own body and a Warning log line repeated on every retry. Point your own monitoring at
+          # /health/ready; these probes stay on /health on purpose.
+          #
+          # Generous initial delay: the backend creates its own schema on an empty database and
+          # registers Hangfire jobs before it starts answering, which takes appreciably longer
+          # than a warm start.
+          readinessProbe:
+            httpGet: { path: /health, port: 5000 }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            httpGet: { path: /health, port: 5000 }
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            failureThreshold: 5
+          resources:
+{{ toYaml .Values.resources.backend | indent 12 }}
+
+        - name: frontend
+          image: "{{ .Values.image.frontend.repository }}:{{ .Values.image.frontend.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http-web
+              containerPort: 3000
+          env:
+            - name: NODE_ENV
+              value: "production"
+          # NEXT_PUBLIC_API_URL is deliberately absent: Next.js inlines NEXT_PUBLIC_* into the
+          # client bundle at BUILD time, so setting it here would have no effect. It is baked
+          # into the image as "/" (an origin, not a path prefix — request paths already carry
+          # their own /api/v1/...).
+          #
+          # "/" returns a 307 to /login for an unauthenticated visitor, which is correct, so the
+          # probe accepts 3xx. A 200-only check would fail a perfectly healthy container.
+          readinessProbe:
+            httpGet: { path: /, port: 3000 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            failureThreshold: 30
+          resources:
+{{ toYaml .Values.resources.frontend | indent 12 }}

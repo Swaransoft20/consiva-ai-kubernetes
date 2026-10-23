@@ -1,0 +1,190 @@
+x-google-marketplace:
+  schemaVersion: v2
+  applicationApiVersion: v1beta1
+  # Must match the Application CRD's spec.descriptor.version and the image tags produced by
+  # build-images.sh.
+  publishedVersion: "1.0.8"
+  publishedVersionMetadata:
+    releaseNote: >-
+      Initial Google Cloud Marketplace release (BYOL). Free tier by default; an Enterprise
+      licence key issued by Consiva unlocks the paid modules for the contract term.
+      (1.0.1 corrected the deployer input schema: the secret inputs are declared MASKED_FIELD.
+      1.0.2 forced postcss to >= 8.5.12, resolving CVE-2026-45623. 1.0.3 generates the JWT secret
+      automatically, gives the external database and SMTP inputs non-functional placeholder
+      defaults so the app can be deployed unattended, and lets the backend start and converge in
+      the background when the database is not yet reachable. 1.0.4 fixes the reachability probe
+      so it also converges against a server that does not yet contain the application's
+      database.)
+  images:
+    # Google rewrites these at deploy time; the keys map to the image.* values the Helm chart
+    # consumes. '' (empty key) is the primary image, which Marketplace publishes at the image
+    # prefix itself with no name suffix — so the BACKEND is the primary image here, and the
+    # frontend is an additional image in its own folder beneath it.
+    #
+    # REPO_WITH_REGISTRY on both: chart/templates/deployment.yaml builds each container's image
+    # as "{{ repository }}:{{ tag }}", so the repository value has to carry the registry host.
+    # (REPO_WITHOUT_REGISTRY would yield a hostless reference that Kubernetes cannot pull.)
+    '':
+      properties:
+        image.backend.repository:
+          type: REPO_WITH_REGISTRY
+        image.backend.tag:
+          type: TAG
+    frontend:
+      properties:
+        image.frontend.repository:
+          type: REPO_WITH_REGISTRY
+        image.frontend.tag:
+          type: TAG
+
+# Masked inputs use `type: MASKED_FIELD`.
+#
+# NOT `type: STRING` with `sensitive: true`, which is what this file used to say. `sensitive` is
+# not a field in the v2 schema, and Producer Portal rejects the whole deployer because of it:
+#   Failed to parse schema from deployer ... Cannot find field: sensitive in message
+#   cloud.commerce.common.display.v1.XGoogleMarketplaceProperty
+# `STRING` was inert here too — it only does anything alongside a `string:` block declaring
+# generatedProperties. MASKED_FIELD masks the value in the deploy form (users get a reveal
+# option) and passes it through unchanged, so the Secret receives the same values under the same
+# names as before.
+
+properties:
+  name:
+    type: string
+    x-google-marketplace:
+      type: NAME
+  namespace:
+    type: string
+    x-google-marketplace:
+      type: NAMESPACE
+
+  appDomainUrl:
+    type: string
+    title: Application URL
+    description: >-
+      The full https:// URL this deployment will be reached at. Drives verification and
+      password-reset links, the dashboard's CORS allowlist, and the embed snippet you paste
+      into your own websites. If you do not have a hostname yet, deploy once, obtain an address
+      (see "Create an Ingress" below), then upgrade the release with this value set.
+    default: "http://localhost"
+
+  ingress.enabled:
+    type: boolean
+    title: Create an Ingress
+    description: >-
+      Leave OFF unless you want this deployment to create its own Ingress. On GKE an Ingress
+      provisions an external Application Load Balancer, which commonly takes 4-6 minutes to become
+      healthy — longer than the deployment's readiness budget, so switching this on can make an
+      otherwise healthy deployment be reported as failed. The app is fully installed either way;
+      the Services are reachable in-cluster immediately. Turn this on afterwards (or route to the
+      Services with your own ingress controller) to expose the app externally.
+    default: false
+
+  db.connectionString:
+    type: string
+    title: SQL Server connection string
+    description: >-
+      REQUIRED for real use. This app does not ship a database — point it at Cloud SQL for SQL
+      Server or your own instance. Must include ;IPAddressPreference=IPv4First (works around a
+      Microsoft.Data.SqlClient fault resolving IPs on Linux containers) and, unless you present a
+      trusted certificate, ;TrustServerCertificate=True. Example:
+      Server=10.0.0.5,1433;Database=CookieConsentDB;User Id=consiva;Password=...;TrustServerCertificate=True;Encrypt=True;IPAddressPreference=IPv4First;
+      ------------------------------------------------------------------
+      The default below is a NON-FUNCTIONAL PLACEHOLDER. It exists only so Google's automated
+      verification can deploy this app unattended; it points at nothing. REPLACE IT before any
+      real use — a deployment left on the default runs permanently degraded.
+      ------------------------------------------------------------------
+    default: "Server=127.0.0.1,1433;Database=consiva;User Id=none;Password=none;TrustServerCertificate=True;Encrypt=True;IPAddressPreference=IPv4First;"
+    x-google-marketplace:
+      type: MASKED_FIELD        # masked in the deploy form; see the note above "properties"
+
+  jwt.secret:
+    type: string
+    title: JWT Secret Key
+    description: >-
+      Signs this deployment's own session tokens. Generated automatically — you do not supply it,
+      and it is unique to this deployment. Rotating it invalidates every existing session, which
+      only forces users to sign in again.
+    x-google-marketplace:
+      type: GENERATED_PASSWORD
+      generatedPassword:
+        length: 32
+        includeSymbols: false
+        # base64 MUST be false. It defaults to TRUE, and chart/templates/secret.yaml puts this
+        # value into the Secret's stringData, which Kubernetes base64-encodes itself — leaving
+        # the default on would encode it twice and every token signature would be computed with
+        # the wrong key. The schema docs say exactly this: "If the value is to be encoded in your
+        # Helm template, this property should be set to False."
+        base64: false
+
+  smtp.host:
+    type: string
+    title: SMTP host
+    description: >-
+      REQUIRED for real use. Verification codes go to external data principals exercising their
+      DPDP rights, who have no way to recover from a silently dropped message. Microsoft 365,
+      Google Workspace and Amazon SES's SMTP interface all work.
+      ------------------------------------------------------------------
+      The default below is a NON-FUNCTIONAL PLACEHOLDER. It exists only so Google's automated
+      verification can deploy this app unattended; it points at nothing. REPLACE IT before any
+      real use — a deployment left on the default runs permanently degraded.
+      ------------------------------------------------------------------
+      Mail delivery is never silently dropped: a send against this placeholder fails loudly and
+      is logged as an error.
+    default: "localhost"
+  smtp.port:
+    type: string
+    title: SMTP port
+    description: 587 for STARTTLS (usual), or 465 for implicit TLS.
+    default: "587"
+  smtp.username:
+    type: string
+    title: SMTP username
+    description: >-
+      REQUIRED for real use. The default "none" is a non-functional placeholder for automated
+      verification and must be replaced.
+    default: "none"
+  smtp.password:
+    type: string
+    title: SMTP password
+    description: >-
+      REQUIRED for real use. Stored in a Kubernetes Secret. The default "none" is a
+      non-functional placeholder for automated verification and must be replaced.
+    default: "none"
+    x-google-marketplace:
+      type: MASKED_FIELD        # masked in the deploy form; see the note above "properties"
+  smtp.fromEmail:
+    type: string
+    title: SMTP from address
+    description: >-
+      REQUIRED for real use. The address outbound mail is sent as. The default is a
+      non-functional placeholder for automated verification and must be replaced.
+    default: "no-reply@example.com"
+  smtp.fromName:
+    type: string
+    title: SMTP from name
+    description: The display name outbound mail is sent as.
+    default: "Consiva CMP"
+
+  enterpriseLicenseKey:
+    type: string
+    title: Enterprise license key
+    description: >-
+      OPTIONAL. Leave blank to run the Free tier. If you have agreed a BYOL contract with
+      Consiva, paste the signed key you were issued. It is verified offline inside your own
+      cluster — nothing is sent to Consiva or to Google. A blank, invalid or expired key never
+      blocks the deployment; it simply runs the Free tier and records the reason in the
+      backend's logs.
+    default: ""
+    x-google-marketplace:
+      type: MASKED_FIELD        # masked in the deploy form; see the note above "properties"
+
+required:
+  - name
+  - namespace
+  - db.connectionString
+  - jwt.secret
+  - smtp.host
+  - smtp.username
+  - smtp.password
+  - smtp.fromEmail

@@ -1,0 +1,57 @@
+{{/*
+  GKE-only. Pins the Google Cloud health check for each Service instead of letting the GKE
+  Ingress controller infer one from a readiness probe.
+
+  Why this exists: a Google Cloud health check accepts ONLY an HTTP 200; there is no
+  configurable 200-399 matcher. The frontend answers "/" with a 307 to /login,
+  which is correct, so an inferred check on "/" marks a perfectly healthy backend UNHEALTHY and
+  the load balancer serves 502 for every page. Observed on GKE 1.36.4 with 1.0.7:
+  ingress.kubernetes.io/backends showed the frontend NEG UNHEALTHY while the backend was HEALTHY.
+
+  Why not just repoint the frontend readinessProbe at /login: inference is documented as
+  unsupported for Pods with multiple containers ("GKE does not have a way to select the readiness
+  probe of a specific container"), and this Pod runs backend + frontend; the inferred settings are
+  never re-read after the load balancer exists; and the GKE Enterprise Ingress controller ignores
+  readiness probes altogether and would fall back to "/", reproducing the bug at a customer.
+  Google's own recommendation: "Use a BackendConfig CRD to have the most control over the load
+  balancer health check settings."
+
+  requestPath per Service, both verified against the running Pod:
+    frontend /login  -> 200   ("/" -> 307, /favicon.ico -> 404)
+    backend  /health -> 200 even when the database is unreachable (see deployment.yaml)
+
+  `port` is deliberately omitted so the check follows the Service's serving port, which is what
+  the inferred checks did (portSpecification: USE_SERVING_PORT). Pinning a number would have to
+  differ between NEG backends (a containerPort) and instance-group backends (a nodePort).
+
+  BackendConfig is a GKE custom resource. On a cluster without the CRD — kind, k3s, anything with
+  ingress-nginx — rendering it fails the install outright, so it has its own switch:
+  set ingress.backendConfig=false there. The Service annotation alone is inert everywhere.
+*/}}
+{{- if and .Values.ingress.enabled .Values.ingress.backendConfig }}
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: {{ .Values.name }}-frontend
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Values.name }}
+    app.kubernetes.io/component: consiva-app
+spec:
+  healthCheck:
+    type: HTTP
+    requestPath: /login
+---
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: {{ .Values.name }}-backend
+  namespace: {{ .Values.namespace }}
+  labels:
+    app.kubernetes.io/name: {{ .Values.name }}
+    app.kubernetes.io/component: consiva-app
+spec:
+  healthCheck:
+    type: HTTP
+    requestPath: /health
+{{- end }}
